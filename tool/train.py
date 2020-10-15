@@ -22,7 +22,7 @@ from tensorboardX import SummaryWriter
 from collections import OrderedDict
 
 from util import dataset, transform, config
-from util.util import AverageMeter, poly_learning_rate, intersectionAndUnionGPU, batchPSNRandSSIMGPU, find_free_port
+from util.util import AverageMeter, poly_learning_rate, intersectionAndUnionGPU, batchPSNRandSSIMGPU, find_free_port, intersectionAndUnionCPU
 
 cv2.ocl.setUseOpenCL(False)
 cv2.setNumThreads(0)
@@ -121,6 +121,15 @@ def main_worker(gpu, ngpus_per_node, argss):
     else:
         raise NotImplementedError
 
+    if args.edge_loss_type == 'focal':
+        edge_criterion = SigmoidFocalLoss(ignore_label=255, gamma=2.0, alpha=0.25)
+    elif args.edge_loss_type == 'ce':
+        edge_criterion = nn.CrossEntropyLoss(ignore_index=255)
+    elif args.edge_loss_type == 'mse':
+        edge_criterion = nn.MSELoss()
+    else:
+        raise NotImplementedError
+
     if args.derain_loss_type == 'mse':
         derain_criterion = nn.MSELoss()
     else:
@@ -128,15 +137,21 @@ def main_worker(gpu, ngpus_per_node, argss):
 
     if args.arch == 'iterative_derain_seg':
         from model.dic_arch_derainseg import DIC
-        model = DIC(args, derain_criterion=derain_criterion, seg_criterion=seg_criterion, is_train=True)
+        model = DIC(args,
+                    derain_criterion=derain_criterion,
+                    seg_criterion=seg_criterion,
+                    edge_criterion=edge_criterion,
+                    is_train=True)
         # modules_ori = [model.conv_in, model.conv_out, model.derain_final_conv,
         #                model.block.down1, model.block.down2, model.block.down3,
         #                model.block.up1, model.block.up2, model.block.up3,
         #                model.block.inc, model.block.outc,
         #                model.seg_net]
         # modules_new = [model.block.fusion_block]
-        modules_ori = [model.seg_net]
-        modules_new = [model.block]
+        modules_ori = [model.seg_net, model.first_block]
+        modules_new = [model.block, model.conv_in,
+                       model.conv_out, model.derain_final_conv]
+        modules_raw = [model.edge_net]
     else:
         raise NotImplementedError
 
@@ -145,7 +160,10 @@ def main_worker(gpu, ngpus_per_node, argss):
         params_list.append(dict(params=module.parameters(), lr=args.base_lr))
     for module in modules_new:
         params_list.append(dict(params=module.parameters(), lr=args.base_lr * 10))
-    args.index_split = 1
+    for module in modules_raw:
+        params_list.append(dict(params=module.parameters(), lr=args.base_lr * 20))
+    args.index_split_1 = 2
+    args.index_split_2 = 6
     optimizer = torch.optim.SGD(params_list, lr=args.base_lr, momentum=args.momentum, weight_decay=args.weight_decay)
     if args.sync_bn:
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
@@ -169,12 +187,16 @@ def main_worker(gpu, ngpus_per_node, argss):
 
     if args.pretrained:
         if main_process():
-            logger.info("=> Loading derain weight from '{}'\n and seg weight from '{}'".format(args.derain_pretrained_path, args.seg_pretrained_path))
+            logger.info("=> Loading derain first weight from '{}'\n "
+                        "and '{}'\n seg weight from '{}'".format(args.derain_first_pretrained_path,
+                                                                 args.derain_last_pretrained_path,
+                                                                 args.seg_pretrained_path))
         load_derain_and_seg(model, args)
         if main_process():
-            logger.info(
-                "=> Loaded derain weight from '{}'\n and seg weight from '{}'".format(args.derain_pretrained_path,
-                                                                                           args.seg_pretrained_path))
+            logger.info("=> Loaded derain first weight from '{}'\n "
+                        "and '{}'\n seg weight from '{}'".format(args.derain_first_pretrained_path,
+                                                                 args.derain_last_pretrained_path,
+                                                                 args.seg_pretrained_path))
 
     if args.resume:
         if os.path.isfile(args.resume):
@@ -198,9 +220,9 @@ def main_worker(gpu, ngpus_per_node, argss):
     std = [item * value_scale for item in std]
 
     train_transform = transform.Compose([
-        transform.RandScale([args.scale_min, args.scale_max]),
-        transform.RandRotate([args.rotate_min, args.rotate_max], padding=mean, ignore_label=args.ignore_label),
-        transform.RandomGaussianBlur(),
+        # transform.RandScale([args.scale_min, args.scale_max]),
+        # transform.RandRotate([args.rotate_min, args.rotate_max], padding=mean, ignore_label=args.ignore_label),
+        # transform.RandomGaussianBlur(),
         transform.RandomHorizontalFlip(),
         transform.Crop([args.train_h, args.train_w], crop_type='rand', padding=mean, ignore_label=args.ignore_label),
         transform.ToTensor(),
@@ -258,6 +280,7 @@ def train(train_loader, model, optimizer, epoch):
     data_time = AverageMeter()
     derain_loss_meter = AverageMeter()
     seg_loss_meter = AverageMeter()
+    edge_loss_meter = AverageMeter()
     loss_meter = AverageMeter()
     intersection_meter = AverageMeter()
     union_meter = AverageMeter()
@@ -272,19 +295,25 @@ def train(train_loader, model, optimizer, epoch):
     model.train()
     end = time.time()
     max_iter = args.epochs * len(train_loader)
-    for i, (clear_label, rain_input, seg_label) in enumerate(train_loader):
+    for i, (clear_label, rain_input, seg_label, edge_label) in enumerate(train_loader):
         data_time.update(time.time() - end)
 
         clear_label = clear_label.cuda(non_blocking=True)
         rain_input = rain_input.cuda(non_blocking=True)
         seg_label = seg_label.cuda(non_blocking=True)
-        derain_output, seg_output, derain_losses, seg_losses = model(rain_input, clear_label, seg_label)
+        edge_label = edge_label.cuda(non_blocking=True)
+        derain_output, seg_output, _, derain_losses, seg_losses, edge_losses = model(rain_input, clear_label, seg_label, edge_label)
+        derain_losses = map(list_multiply, derain_losses, args.derain_loss_step_weight)
         derain_sum_loss = sum(derain_losses)
         seg_losses = map(list_multiply, seg_losses, args.seg_loss_step_weight)
         seg_sum_loss = sum(seg_losses)
+        edge_losses = map(list_multiply, edge_losses, args.edge_loss_step_weight)
+        edge_sum_loss = sum(edge_losses)
         if not args.multiprocessing_distributed:
-            derain_sum_loss, seg_sum_loss = torch.mean(derain_sum_loss), torch.mean(seg_sum_loss)
-        loss = args.derain_loss_weight * derain_sum_loss + args.seg_loss_weight * seg_sum_loss
+            derain_sum_loss, seg_sum_loss, edge_sum_loss = torch.mean(derain_sum_loss), torch.mean(seg_sum_loss), torch.mean(edge_sum_loss)
+        loss = args.derain_loss_weight * derain_sum_loss + \
+               args.seg_loss_weight * seg_sum_loss + \
+               args.edge_loss_weight * edge_sum_loss
 
         optimizer.zero_grad()
         loss.backward()
@@ -292,35 +321,40 @@ def train(train_loader, model, optimizer, epoch):
 
         n = rain_input.size(0)
         if args.multiprocessing_distributed:
-            derain_sum_loss, seg_sum_loss, loss = derain_sum_loss.detach() * n, seg_sum_loss * n, loss * n  # not considering ignore pixels
+            derain_sum_loss, seg_sum_loss, edge_sum_loss, loss = derain_sum_loss.detach() * n, seg_sum_loss * n, \
+                                                                 edge_sum_loss.detach() * n, loss * n  # not considering ignore pixels
             count = seg_label.new_tensor([n], dtype=torch.long)
-            dist.all_reduce(derain_sum_loss), dist.all_reduce(seg_sum_loss), dist.all_reduce(loss), dist.all_reduce(count)
+            dist.all_reduce(derain_sum_loss), dist.all_reduce(seg_sum_loss), dist.all_reduce(edge_sum_loss), dist.all_reduce(loss), dist.all_reduce(count)
             n = count.item()
-            derain_sum_loss, seg_sum_loss, loss = derain_sum_loss / n, seg_sum_loss / n, loss / n
+            derain_sum_loss, seg_sum_loss, edge_sum_loss, loss = derain_sum_loss / n, edge_sum_loss / n, seg_sum_loss / n, loss / n
 
-        intersection, union, target = intersectionAndUnionGPU(seg_output, seg_label, args.classes, args.ignore_label)
+        # intersection, union, target = intersectionAndUnionCPU(seg_output, seg_label, args.classes, args.ignore_label)
         psnr, ssim = batchPSNRandSSIMGPU(derain_output, clear_label)
-        if args.multiprocessing_distributed:
-            dist.all_reduce(intersection), dist.all_reduce(union), dist.all_reduce(target)
-        intersection, union, target = intersection.cpu().numpy(), union.cpu().numpy(), target.cpu().numpy()
-        intersection_meter.update(intersection), union_meter.update(union), target_meter.update(target)
+        # if args.multiprocessing_distributed:
+        #     dist.all_reduce(intersection), dist.all_reduce(union), dist.all_reduce(target)
+        # intersection, union, target = intersection.cpu().numpy(), union.cpu().numpy(), target.cpu().numpy()
+        # intersection_meter.update(intersection), union_meter.update(union), target_meter.update(target)
         psnr_meter.update(psnr), ssim_meter.update(ssim)
 
-        accuracy = sum(intersection_meter.val) / (sum(target_meter.val) + 1e-10)
-        psnr_avg = psnr_meter.avg
-        ssim_avg = ssim_meter.avg
+        # accuracy = sum(intersection_meter.val) / (sum(target_meter.val) + 1e-10)
+        accuracy = 0
+        psnr_val = psnr_meter.val
+        ssim_val = ssim_meter.val
         derain_loss_meter.update(derain_sum_loss.item(), n)
         seg_loss_meter.update(seg_sum_loss.item(), n)
+        edge_loss_meter.update(edge_sum_loss.item(), n)
         loss_meter.update(loss.item(), n)
         batch_time.update(time.time() - end)
         end = time.time()
 
         current_iter = epoch * len(train_loader) + i + 1
         current_lr = poly_learning_rate(args.base_lr, current_iter, max_iter, power=args.power)
-        for index in range(0, args.index_split):
+        for index in range(0, args.index_split_1):
             optimizer.param_groups[index]['lr'] = current_lr
-        for index in range(args.index_split, len(optimizer.param_groups)):
+        for index in range(args.index_split_1, args.index_split_2):
             optimizer.param_groups[index]['lr'] = current_lr * 10
+        for index in range(args.index_split_2, len(optimizer.param_groups)):
+            optimizer.param_groups[index]['lr'] = current_lr * 20
         remain_iter = max_iter - current_iter
         remain_time = remain_iter * batch_time.avg
         t_m, t_s = divmod(remain_time, 60)
@@ -334,35 +368,41 @@ def train(train_loader, model, optimizer, epoch):
                         'Remain {remain_time} '
                         'DerainLoss {derain_loss_meter:.4f} '
                         'SegLoss {seg_loss_meter:.4f} '
+                        'EdgeLoss {edge_loss_meter:.4f} '
                         'Loss {loss_meter:.4f} '
                         'Accuracy {accuracy:.4f}.'
-                        'PSNR {psnr_avg:.2f}.'
-                        'SSIM {ssim_avg:.4f}.'.format(epoch+1, args.epochs, i + 1, len(train_loader),
+                        'PSNR {psnr_val:.2f}.'
+                        'SSIM {ssim_val:.4f}.'.format(epoch+1, args.epochs, i + 1, len(train_loader),
                                                       batch_time=batch_time,
                                                       data_time=data_time,
                                                       remain_time=remain_time,
                                                       derain_loss_meter=derain_loss_meter.val,
                                                       seg_loss_meter=seg_loss_meter.val,
+                                                      edge_loss_meter=edge_loss_meter.val,
                                                       loss_meter=loss_meter.val,
                                                       accuracy=accuracy,
-                                                      psnr_avg=psnr_avg,
-                                                      ssim_avg=ssim_avg))
+                                                      psnr_val=psnr_val,
+                                                      ssim_val=ssim_val))
 
         if main_process():
             writer.add_scalar('derain_loss_train_batch', derain_loss_meter.val, current_iter)
             writer.add_scalar('seg_loss_train_batch', seg_loss_meter.val, current_iter)
+            writer.add_scalar('edge_loss_train_batch', edge_loss_meter.val, current_iter)
             writer.add_scalar('loss_train_batch', loss_meter.val, current_iter)
-            writer.add_scalar('mIoU_train_batch', np.mean(intersection / (union + 1e-10)), current_iter)
-            writer.add_scalar('mAcc_train_batch', np.mean(intersection / (target + 1e-10)), current_iter)
+            # writer.add_scalar('mIoU_train_batch', np.mean(intersection / (union + 1e-10)), current_iter)
+            # writer.add_scalar('mAcc_train_batch', np.mean(intersection / (target + 1e-10)), current_iter)
             writer.add_scalar('allAcc_train_batch', accuracy, current_iter)
-            writer.add_scalar('psnr_train_batch', psnr_avg, current_iter)
-            writer.add_scalar('ssim_train_batch', ssim_avg, current_iter)
+            writer.add_scalar('psnr_train_batch', psnr_val, current_iter)
+            writer.add_scalar('ssim_train_batch', ssim_val, current_iter)
 
     iou_class = intersection_meter.sum / (union_meter.sum + 1e-10)
     accuracy_class = intersection_meter.sum / (target_meter.sum + 1e-10)
-    mIoU = np.mean(iou_class)
-    mAcc = np.mean(accuracy_class)
-    allAcc = sum(intersection_meter.sum) / (sum(target_meter.sum) + 1e-10)
+    # mIoU = np.mean(iou_class)
+    # mAcc = np.mean(accuracy_class)
+    # allAcc = sum(intersection_meter.sum) / (sum(target_meter.sum) + 1e-10)
+    mIoU = 0
+    mAcc = 0
+    allAcc = 0
     if main_process():
         logger.info(
             'Train result at epoch [{}/{}]: mIoU/mAcc/allAcc {:.4f}/{:.4f}/{:.4f}.'.format(epoch + 1, args.epochs, mIoU,
@@ -459,10 +499,26 @@ def _load_func(m, d):
 
 def load_derain_and_seg(model, args):
     model = _net_init(model)
-    if args.derain_pretrained_path is not None:
+
+    if os.path.isfile(args.edge_pretrained_path):
+        logger.info("=> loading edge checkpoint '{}'".format(args.edge_pretrained_path))
+        checkpoint = torch.load(args.edge_pretrained_path)
+        model.load_state_dict(checkpoint['state_dict'], strict=False)
+        logger.info("=> loaded edge checkpoint '{}'".format(args.edge_pretrained_path))
+    else:
+        raise RuntimeError("=> no checkpoint found at '{}'".format(args.edge_pretrained_path))
+
+    if args.derain_first_pretrained_path is not None:
         print('===> Loading Derain model from %s' %
-              args.derain_pretrained_path)
-        checkpoint = torch.load(args.derain_pretrained_path)
+              args.derain_first_pretrained_path)
+        checkpoint = torch.load(args.derain_first_pretrained_path)
+        res_str = _load_func(model, checkpoint)
+        print(res_str)
+
+    if args.derain_last_pretrained_path is not None:
+        print('===> Loading Derain model from %s' %
+              args.derain_last_pretrained_path)
+        checkpoint = torch.load(args.derain_last_pretrained_path)
         res_str = _load_func(model, checkpoint)
         print(res_str)
 
@@ -636,6 +692,40 @@ class ProbOhemCrossEntropy2d(nn.Module):
         target = target.view(b, h, w)
 
         return self.criterion(pred, target)
+
+
+class SigmoidFocalLoss(nn.Module):
+    def __init__(self, ignore_label, gamma=2.0, alpha=0.25,
+                 reduction='mean'):
+        super(SigmoidFocalLoss, self).__init__()
+        self.ignore_label = ignore_label
+        self.gamma = gamma
+        self.alpha = alpha
+        self.reduction = reduction
+
+    def forward(self, pred, target):
+        b, h, w = target.size()
+        pred = pred.view(b, -1, 1)
+        pred_sigmoid = pred.sigmoid()
+        target = target.view(b, -1).float()
+        mask = (target.ne(self.ignore_label)).float()
+        target = mask * target
+        onehot = target.view(b, -1, 1)
+
+        # TODO: use the pred instead of pred_sigmoid
+        max_val = (-pred_sigmoid).clamp(min=0)
+
+        pos_part = (1 - pred_sigmoid) ** self.gamma * (
+                pred_sigmoid - pred_sigmoid * onehot)
+        neg_part = pred_sigmoid ** self.gamma * (max_val + (
+                (-max_val).exp() + (-pred_sigmoid - max_val).exp()).log())
+
+        loss = -(self.alpha * pos_part + (1 - self.alpha) * neg_part).sum(
+            dim=-1) * mask
+        if self.reduction == 'mean':
+            loss = loss.mean()
+
+        return loss
 
 
 if __name__ == '__main__':

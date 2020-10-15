@@ -1,0 +1,81 @@
+DATA:
+  data_root: H:\dataset\cityscapes\cityscapes
+  rain_data_root: H:\dataset\cityscapes\cityscapes_rainstreak\rain\rain_fuse_level5
+  train_list: H:\dataset\cityscapes\cityscapes\list\cityscapes\fine_train.txt
+  val_list: H:\dataset\cityscapes\cityscapes\list\cityscapes\fine_val.txt
+  classes: 19
+
+TRAIN:
+  arch: iterative_derain_seg
+  derain_arch: BiDerainNet
+  seg_arch: bisenetx39
+  num_steps: 3
+  num_fusion_block: 3
+  conv_block_num_features: 64
+  sync_bn: True  # adopt syncbn or not
+  train_h: 400 # 500
+  train_w: 400 # 500
+  scale_min: 0.5  # minimum random scale
+  scale_max: 1.5 # 2.0  # maximum random scale
+  rotate_min: -10  # minimum random rotate
+  rotate_max: 10  # maximum random rotate
+  zoom_factor: 8  # zoom factor for final prediction during training, be in [1, 2, 4, 8]
+  ignore_label: 255
+  derain_loss_type: mse
+  derain_loss_weight: 10
+  derain_loss_step_weight: [1, 1, 1]
+  seg_loss_type: ce
+  seg_loss_weight: 0.001
+  seg_loss_step_weight: [1, 1, 1]
+  edge_loss_type: mse
+  edge_loss_weight: 0.001
+  edge_loss_step_weight: [1, 1, 1]
+  ohem: True
+  train_gpu: [0]
+  workers: 16  # data loader workers
+  batch_size: 2  # batch size for training
+  batch_size_val: 8  # batch size for validation during training, memory and speed tradeoff
+  base_lr: 0.0001
+  epochs: 250
+  start_epoch: 0
+  power: 0.9
+  momentum: 0.9
+  weight_decay: 0
+  manual_seed:
+  print_freq: 10
+  save_freq: 1
+  save_path: exp/cityscapes/iterative_biderainnet_bisenetx39/model_lr1e5
+  pretrained: True
+  edge_pretrained_path: initmodel/BiDerainNetEdge.pth
+  derain_first_pretrained_path: initmodel/BiDerainNet_first.pth
+  derain_last_pretrained_path: initmodel/BiderainNet_last.pth
+  seg_pretrained_path: initmodel/cityscapes-bisenet-X39.pth
+  fix_bn: False
+  weight:  # path to initial weight (default: none)
+  resume:  # path to latest checkpoint (default: none)
+  evaluate: False  # evaluate on validation set, extra gpu memory needed and small batch_size_val is recommend
+Distributed:
+  dist_url: tcp://127.0.0.1:6789
+  dist_backend: 'nccl'
+  multiprocessing_distributed: True
+  world_size: 1
+  rank: 0
+
+TEST:
+  test_list: H:\dataset\cityscapes\cityscapes\list\cityscapes\fine_val.txt
+  split: val  # split in [train, val and test]
+  base_size: 2048  # based size for scaling
+  test_h: 400
+  test_w: 400
+  ori_h: 1024
+  ori_w: 2048
+  full_img_testing: True
+  scales: [1.0]  # evaluation scales, ms as [0.5, 0.75, 1.0, 1.25, 1.5, 1.75]
+  has_prediction: False # has prediction already or not
+  index_start: 0  # evaluation start index in list
+  index_step: 0  # evaluation step index in list, 0 means to end
+  test_gpu: [0]
+  model_path: initmodel/DIC_BiderainNet_BiseNetX39_init.pth  # evaluation model path
+  save_folder: exp/cityscapes/iterative_biderainnet_bisenetx39/result/init_epoch/val/ss/fullimg_step2  # results save folder
+  colors_path: H:\dataset\cityscapes\cityscapes\cityscapes_colors.txt  # path of dataset colors
+  names_path: H:\dataset\cityscapes\cityscapes\cityscapes_names.txt  # path of dataset category names

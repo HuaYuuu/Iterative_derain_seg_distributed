@@ -6,7 +6,11 @@ import torch.nn.functional as F
 
 
 class DIC(nn.Module):
-    def __init__(self, args, derain_criterion=nn.MSELoss, seg_criterion=nn.CrossEntropyLoss, is_train=True):
+    def __init__(self, args,
+                 derain_criterion=nn.MSELoss,
+                 seg_criterion=nn.CrossEntropyLoss,
+                 edge_criterion=nn.CrossEntropyLoss,
+                 is_train=True):
         super().__init__()
         in_channels = 3
         out_channels = 3
@@ -15,6 +19,7 @@ class DIC(nn.Module):
         self.is_train = is_train
         self.derain_criterion = derain_criterion
         self.seg_criterion = seg_criterion
+        self.edge_criterion = edge_criterion
 
         self.num_steps = args.num_steps
         num_features = args.conv_block_num_features
@@ -62,9 +67,14 @@ class DIC(nn.Module):
                                        norm_layer=norm_type,
                                        output_size=[args.train_h, args.train_w])
             else:
-                self.seg_net = BiSeNet(out_planes=args.classes,
-                                       norm_layer=norm_type,
-                                       output_size=[args.test_h, args.test_w])
+                if args.full_img_testing:
+                    self.seg_net = BiSeNet(out_planes=args.classes,
+                                           norm_layer=norm_type,
+                                           output_size=[args.ori_h, args.ori_w])
+                else:
+                    self.seg_net = BiSeNet(out_planes=args.classes,
+                                           norm_layer=norm_type,
+                                           output_size=[args.test_h, args.test_w])
         elif args.seg_arch == 'bisenetx39':
             from .modules.bisenet_x39 import BiSeNet
             if is_train:
@@ -72,19 +82,25 @@ class DIC(nn.Module):
                                        norm_layer=norm_type,
                                        output_size=[args.train_h, args.train_w])
             else:
-                self.seg_net = BiSeNet(out_planes=args.classes,
-                                       norm_layer=norm_type,
-                                       output_size=[args.test_h, args.test_w])
+                if args.full_img_testing:
+                    self.seg_net = BiSeNet(out_planes=args.classes,
+                                           norm_layer=norm_type,
+                                           output_size=[args.ori_h, args.ori_w])
+                else:
+                    self.seg_net = BiSeNet(out_planes=args.classes,
+                                           norm_layer=norm_type,
+                                           output_size=[args.test_h, args.test_w])
         else:
             raise RuntimeError('Undefined Net Type for Segmentation.')
 
-    def forward(self, x, clear_label=None, seg_label=None):
+    def forward(self, x, clear_label=None, seg_label=None, edge_label=None):
 
         inter_res = x
 
         x = self.conv_in(x)
         derain_outs = []
         seg_outs = []
+        edge_outs = []
         heatmap = None
         edge_map = None
 
@@ -93,26 +109,30 @@ class DIC(nn.Module):
                 rain_residual = self.derain_final_conv(self.conv_out(self.first_block(x)))
                 derain = torch.add(inter_res, rain_residual)
                 heatmap = self.seg_net(derain)
-                edge_map = self.edge_net(heatmap)
+                edge_map = self.edge_net(F.softmax(heatmap, dim=1))
             else:
                 rain_residual = self.derain_final_conv(self.conv_out(self.block(x, merge_heatmap(heatmap), edge_map)))
                 derain = torch.add(inter_res, rain_residual)
                 heatmap = self.seg_net(derain)
-                edge_map = self.edge_net(heatmap)
+                edge_map = self.edge_net(F.softmax(heatmap, dim=1))
 
             derain_outs.append(derain)
             seg_outs.append(heatmap)
+            edge_outs.append(edge_map)
 
         if self.is_train:
             derain_losses = []
             seg_losses = []
+            edge_losses = []
             for derain_out in derain_outs:
                 derain_losses.append(self.derain_criterion(derain_out, clear_label))
             for seg_out in seg_outs:
                 seg_losses.append(self.seg_criterion(seg_out, seg_label))
-            return derain_outs[-1], seg_outs[-1].max(1)[1], derain_losses, seg_losses
+            for edge_out in edge_outs:
+                edge_losses.append(self.edge_criterion(edge_out, edge_label))
+            return derain_outs[-1], seg_outs[-1].max(1)[1], edge_outs[-1], derain_losses, seg_losses, edge_losses
         else:
-            return derain_outs, seg_outs
+            return derain_outs[-1], seg_outs[-1], edge_outs[-1]
 
 
 class edge_net(nn.Module):

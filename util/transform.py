@@ -254,15 +254,15 @@ class Compose(object):
     def __init__(self, segtransform):
         self.segtransform = segtransform
 
-    def __call__(self, rain_image, clear_image, label):
+    def __call__(self, rain_image, clear_image, label, edge):
         for t in self.segtransform:
-            rain_image, clear_image, label = t(rain_image, clear_image, label)
-        return rain_image, clear_image, label
+            rain_image, clear_image, label, edge = t(rain_image, clear_image, label, edge)
+        return rain_image, clear_image, label, edge
 
 
 class ToTensor(object):
     # Converts numpy.ndarray (H x W x C) to a torch.FloatTensor of shape (C x H x W).
-    def __call__(self, rain_image, clear_image, label):
+    def __call__(self, rain_image, clear_image, label, edge):
         if not isinstance(rain_image, np.ndarray) or not isinstance(label, np.ndarray):
             raise (RuntimeError("segtransform.ToTensor() only handle np.ndarray"
                                 "[eg: data readed by cv2.imread()].\n"))
@@ -294,7 +294,12 @@ class ToTensor(object):
         label = torch.from_numpy(label)
         if not isinstance(label, torch.LongTensor):
             label = label.long()
-        return rain_image, clear_image, label
+
+        edge = torch.from_numpy(edge)
+        if not isinstance(edge, torch.FloatTensor):
+            edge = edge.float()
+
+        return rain_image, clear_image, label, edge
 
 
 class Normalize(object):
@@ -307,7 +312,7 @@ class Normalize(object):
         self.mean = mean
         self.std = std
 
-    def __call__(self, rain_image, clear_image, label):
+    def __call__(self, rain_image, clear_image, label, edge):
         if self.std is None:
             for t, m in zip(rain_image, self.mean):
                 t.sub_(m)
@@ -320,7 +325,7 @@ class Normalize(object):
         else:
             for t, m, s in zip(clear_image, self.mean, self.std):
                 t.sub_(m).div_(s)
-        return rain_image, clear_image, label
+        return rain_image, clear_image, label, edge
 
 
 class Resize(object):
@@ -329,11 +334,12 @@ class Resize(object):
         assert (isinstance(size, collections.Iterable) and len(size) == 2)
         self.size = size
 
-    def __call__(self, rain_image, clear_image, label):
+    def __call__(self, rain_image, clear_image, label, edge):
         rain_image = cv2.resize(rain_image, self.size[::-1], interpolation=cv2.INTER_LINEAR)
         clear_image = cv2.resize(clear_image, self.size[::-1], interpolation=cv2.INTER_LINEAR)
         label = cv2.resize(label, self.size[::-1], interpolation=cv2.INTER_NEAREST)
-        return rain_image, clear_image, label
+        edge = cv2.resize(edge, self.size[::-1], interpolation=cv2.INTER_NEAREST)
+        return rain_image, clear_image, label, edge
 
 
 class RandScale(object):
@@ -355,7 +361,7 @@ class RandScale(object):
         else:
             raise (RuntimeError("segtransform.RandScale() aspect_ratio param error.\n"))
 
-    def __call__(self, rain_image, clear_image, label):
+    def __call__(self, rain_image, clear_image, label, edge):
         temp_scale = self.scale[0] + (self.scale[1] - self.scale[0]) * random.random()
         temp_aspect_ratio = 1.0
         if self.aspect_ratio is not None:
@@ -366,7 +372,8 @@ class RandScale(object):
         rain_image = cv2.resize(rain_image, None, fx=scale_factor_x, fy=scale_factor_y, interpolation=cv2.INTER_LINEAR)
         clear_image = cv2.resize(clear_image, None, fx=scale_factor_x, fy=scale_factor_y, interpolation=cv2.INTER_LINEAR)
         label = cv2.resize(label, None, fx=scale_factor_x, fy=scale_factor_y, interpolation=cv2.INTER_NEAREST)
-        return rain_image, clear_image, label
+        edge = cv2.resize(edge, None, fx=scale_factor_x, fy=scale_factor_y, interpolation=cv2.INTER_NEAREST)
+        return rain_image, clear_image, label, edge
 
 
 class Crop(object):
@@ -406,7 +413,7 @@ class Crop(object):
         else:
             raise (RuntimeError("ignore_label should be an integer number\n"))
 
-    def __call__(self, rain_image, clear_image, label):
+    def __call__(self, rain_image, clear_image, label, edge):
         h, w = label.shape
         pad_h = max(self.crop_h - h, 0)
         pad_w = max(self.crop_w - w, 0)
@@ -419,7 +426,10 @@ class Crop(object):
                                             cv2.BORDER_CONSTANT, value=self.padding)
             clear_image = cv2.copyMakeBorder(clear_image, pad_h_half, pad_h - pad_h_half, pad_w_half, pad_w - pad_w_half,
                                              cv2.BORDER_CONSTANT, value=self.padding)
-            label = cv2.copyMakeBorder(label, pad_h_half, pad_h - pad_h_half, pad_w_half, pad_w - pad_w_half, cv2.BORDER_CONSTANT, value=self.ignore_label)
+            label = cv2.copyMakeBorder(label, pad_h_half, pad_h - pad_h_half, pad_w_half, pad_w - pad_w_half,
+                                       cv2.BORDER_CONSTANT, value=self.ignore_label)
+            label = cv2.copyMakeBorder(label, pad_h_half, pad_h - pad_h_half, pad_w_half, pad_w - pad_w_half,
+                                       cv2.BORDER_CONSTANT, value=0)
         h, w = label.shape
         if self.crop_type == 'rand':
             h_off = random.randint(0, h - self.crop_h)
@@ -430,7 +440,8 @@ class Crop(object):
         rain_image = rain_image[h_off:h_off + self.crop_h, w_off:w_off + self.crop_w]
         clear_image = clear_image[h_off:h_off + self.crop_h, w_off:w_off + self.crop_w]
         label = label[h_off:h_off + self.crop_h, w_off:w_off + self.crop_w]
-        return rain_image, clear_image, label
+        edge = edge[h_off:h_off + self.crop_h, w_off:w_off + self.crop_w]
+        return rain_image, clear_image, label, edge
 
 
 class RandRotate(object):
@@ -451,7 +462,7 @@ class RandRotate(object):
         self.ignore_label = ignore_label
         self.p = p
 
-    def __call__(self, rain_image, clear_image, label):
+    def __call__(self, rain_image, clear_image, label, edge):
         if random.random() < self.p:
             angle = self.rotate[0] + (self.rotate[1] - self.rotate[0]) * random.random()
             h, w = label.shape
@@ -461,55 +472,59 @@ class RandRotate(object):
             clear_image = cv2.warpAffine(clear_image, matrix, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
                                          borderValue=self.padding)
             label = cv2.warpAffine(label, matrix, (w, h), flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=self.ignore_label)
-        return rain_image, clear_image, label
+            edge = cv2.warpAffine(edge, matrix, (w, h), flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT,
+                                  borderValue=0)
+        return rain_image, clear_image, label, edge
 
 
 class RandomHorizontalFlip(object):
     def __init__(self, p=0.5):
         self.p = p
 
-    def __call__(self, rain_image, clear_image, label):
+    def __call__(self, rain_image, clear_image, label, edge):
         if random.random() < self.p:
             rain_image = cv2.flip(rain_image, 1)
             clear_image = cv2.flip(clear_image, 1)
             label = cv2.flip(label, 1)
-        return rain_image, clear_image, label
+            edge = cv2.flip(edge, 1)
+        return rain_image, clear_image, label, edge
 
 
 class RandomVerticalFlip(object):
     def __init__(self, p=0.5):
         self.p = p
 
-    def __call__(self, rain_image, clear_image, label):
+    def __call__(self, rain_image, clear_image, label, edge):
         if random.random() < self.p:
             rain_image = cv2.flip(rain_image, 0)
             clear_image = cv2.flip(clear_image, 0)
             label = cv2.flip(label, 0)
-        return rain_image, clear_image, label
+            edge = cv2.flip(edge, 0)
+        return rain_image, clear_image, label, edge
 
 
 class RandomGaussianBlur(object):
     def __init__(self, radius=5):
         self.radius = radius
 
-    def __call__(self, rain_image, clear_image, label):
+    def __call__(self, rain_image, clear_image, label, edge):
         if random.random() < 0.5:
             rain_image = cv2.GaussianBlur(rain_image, (self.radius, self.radius), 0)
             clear_image = cv2.GaussianBlur(clear_image, (self.radius, self.radius), 0)
-        return rain_image, clear_image, label
+        return rain_image, clear_image, label, edge
 
 
 class RGB2BGR(object):
     # Converts image from RGB order to BGR order, for model initialized from Caffe
-    def __call__(self, rain_image, clear_image, label):
+    def __call__(self, rain_image, clear_image, label, edge):
         rain_image = cv2.cvtColor(rain_image, cv2.COLOR_RGB2BGR)
         clear_image = cv2.cvtColor(clear_image, cv2.COLOR_RGB2BGR)
-        return rain_image, clear_image, label
+        return rain_image, clear_image, label, edge
 
 
 class BGR2RGB(object):
     # Converts image from BGR order to RGB order, for model initialized from Pytorch
-    def __call__(self, rain_image, clear_image, label):
+    def __call__(self, rain_image, clear_image, label, edge):
         rain_image = cv2.cvtColor(rain_image, cv2.COLOR_BGR2RGB)
         clear_image = cv2.cvtColor(clear_image, cv2.COLOR_BGR2RGB)
-        return rain_image, clear_image, label
+        return rain_image, clear_image, label, edge

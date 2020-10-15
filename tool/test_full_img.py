@@ -99,50 +99,36 @@ def main():
             logger.info("=> loaded checkpoint '{}'".format(args.model_path))
         else:
             raise RuntimeError("=> no checkpoint found at '{}'".format(args.model_path))
-        test(test_loader, test_data.data_list, model, args.classes, mean, std, args.base_size, args.test_h, args.test_w,
-             args.scales, gray_folder, color_folder, derain_folder, edge_folder, colors)
+        test(test_loader, test_data.data_list, model, args.classes, mean, std, gray_folder, color_folder, derain_folder, edge_folder, colors)
     if args.split != 'test':
         cal_acc(test_data.data_list, gray_folder, derain_folder, args.classes, names, result_txt_path)
 
 
 def net_process(model, image, mean, std=None, flip=True):
     input = torch.from_numpy(image.transpose((2, 0, 1))).float()
-    # if std is None:
-    #     for t, m in zip(input, mean):
-    #         t.sub_(m)
-    # else:
-    #     for t, m, s in zip(input, mean, std):
-    #         t.sub_(m).div_(s)
+    if std is None:
+        for t, m in zip(input, mean):
+            t.sub_(m)
+    else:
+        for t, m, s in zip(input, mean, std):
+            t.sub_(m).div_(s)
     input = input.unsqueeze(0).cuda()
     if flip:
         input = torch.cat([input, input.flip(3)], 0)
     with torch.no_grad():
-        derain_output, seg_output, edge_output = model(input)
+        output = model(input)
     _, _, h_i, w_i = input.shape
-    _, _, h_d, w_d = derain_output.shape
-    _, _, h_s, w_s = seg_output.shape
-    _, _, h_e, w_e = edge_output.shape
-    if (h_d != h_i) or (w_d != w_i):
-        derain_output = F.interpolate(derain_output, (h_i, w_i), mode='bilinear', align_corners=True)
-        seg_output = F.interpolate(seg_output, (h_i, w_i), mode='bilinear', align_corners=True)
-        edge_output = F.interpolate(edge_output, (h_i, w_i), mode='bilinear', align_corners=True)
-    seg_output = F.softmax(seg_output, dim=1)
+    _, _, h_o, w_o = output.shape
+    if (h_o != h_i) or (w_o != w_i):
+        output = F.interpolate(output, (h_i, w_i), mode='bilinear', align_corners=True)
+    output = F.softmax(output, dim=1)
     if flip:
-        derain_output = (derain_output[0] + derain_output[1].flip(2)) / 2
-        seg_output = (seg_output[0] + seg_output[1].flip(2)) / 2
-        edge_output = (edge_output[0] + edge_output[1].flip(2)) / 2
+        output = (output[0] + output[1].flip(2)) / 2
     else:
-        derain_output = derain_output[0]
-        seg_output = seg_output[0]
-        edge_output = edge_output[0]
-    derain_output = derain_output.data.cpu().numpy()
-    derain_output = derain_output.transpose(1, 2, 0)
-    seg_output = seg_output.data.cpu().numpy()
-    seg_output = seg_output.transpose(1, 2, 0)
-    edge_output = edge_output.data.cpu().numpy()
-    edge_output = edge_output.transpose(1, 2, 0)
-    edge_output = np.squeeze(edge_output)
-    return derain_output, seg_output, edge_output
+        output = output[0]
+    output = output.data.cpu().numpy()
+    output = output.transpose(1, 2, 0)
+    return output
 
 
 def scale_process(model, image, classes, crop_h, crop_w, h, w, mean, std=None, stride_rate=2/3):
@@ -158,9 +144,7 @@ def scale_process(model, image, classes, crop_h, crop_w, h, w, mean, std=None, s
     stride_w = int(np.ceil(crop_w*stride_rate))
     grid_h = int(np.ceil(float(new_h-crop_h)/stride_h) + 1)
     grid_w = int(np.ceil(float(new_w-crop_w)/stride_w) + 1)
-    derain_prediction_crop = np.zeros((new_h, new_w, 3), dtype=float)
-    seg_prediction_crop = np.zeros((new_h, new_w, classes), dtype=float)
-    edge_prediction_crop = np.zeros((new_h, new_w), dtype=float)
+    prediction_crop = np.zeros((new_h, new_w, classes), dtype=float)
     count_crop = np.zeros((new_h, new_w), dtype=float)
     for index_h in range(0, grid_h):
         for index_w in range(0, grid_w):
@@ -172,25 +156,14 @@ def scale_process(model, image, classes, crop_h, crop_w, h, w, mean, std=None, s
             s_w = e_w - crop_w
             image_crop = image[s_h:e_h, s_w:e_w].copy()
             count_crop[s_h:e_h, s_w:e_w] += 1
-            temp_derain_prediction_crop, temp_seg_prediction_crop, temp_edge_prediction_crop = net_process(model, image_crop, mean, std)
-            derain_prediction_crop[s_h:e_h, s_w:e_w, :] += temp_derain_prediction_crop
-            seg_prediction_crop[s_h:e_h, s_w:e_w, :] += temp_seg_prediction_crop
-            edge_prediction_crop[s_h:e_h, s_w:e_w] += temp_edge_prediction_crop
-    derain_prediction_crop /= np.expand_dims(count_crop, 2)
-    seg_prediction_crop /= np.expand_dims(count_crop, 2)
-    edge_prediction_crop /= count_crop
-    derain_prediction_crop = derain_prediction_crop[pad_h_half:pad_h_half+ori_h, pad_w_half:pad_w_half+ori_w]
-    seg_prediction_crop = seg_prediction_crop[pad_h_half:pad_h_half + ori_h, pad_w_half:pad_w_half + ori_w]
-    edge_prediction_crop = edge_prediction_crop[pad_h_half:pad_h_half + ori_h, pad_w_half:pad_w_half + ori_w]
-    derain_prediction = cv2.resize(derain_prediction_crop, (w, h), interpolation=cv2.INTER_LINEAR)
-    seg_prediction = cv2.resize(seg_prediction_crop, (w, h), interpolation=cv2.INTER_LINEAR)
-    edge_prediction = cv2.resize(edge_prediction_crop, (w, h), interpolation=cv2.INTER_LINEAR)
-    return derain_prediction, seg_prediction, edge_prediction
+            prediction_crop[s_h:e_h, s_w:e_w, :] += net_process(model, image_crop, mean, std)
+    prediction_crop /= np.expand_dims(count_crop, 2)
+    prediction_crop = prediction_crop[pad_h_half:pad_h_half+ori_h, pad_w_half:pad_w_half+ori_w]
+    prediction = cv2.resize(prediction_crop, (w, h), interpolation=cv2.INTER_LINEAR)
+    return prediction
 
 
-def test(test_loader, data_list, model, classes, mean, std, base_size,
-         crop_h, crop_w, scales, gray_folder, color_folder,
-         derain_folder, edge_folder, colors):
+def test(test_loader, data_list, model, classes, mean, std, gray_folder, color_folder, derain_folder, edge_folder, colors):
     logger.info('>>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>')
     data_time = AverageMeter()
     batch_time = AverageMeter()
@@ -198,37 +171,16 @@ def test(test_loader, data_list, model, classes, mean, std, base_size,
     end = time.time()
     for i, (_, input, _, _) in enumerate(test_loader):
         data_time.update(time.time() - end)
-        input = np.squeeze(input.numpy(), axis=0)
-        image = np.transpose(input, (1, 2, 0))
-        h, w, _ = image.shape
-        derain_prediction = np.zeros((h, w, 3), dtype=float)
-        seg_prediction = np.zeros((h, w, classes), dtype=float)
-        edge_prediction = np.zeros((h, w), dtype=float)
-        for scale in scales:
-            long_size = round(scale * base_size)
-            new_h = long_size
-            new_w = long_size
-            if h > w:
-                new_w = round(long_size/float(h)*w)
-            else:
-                new_h = round(long_size/float(w)*h)
-            image_scale = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-            temp_derain_prediction, temp_seg_prediction, temp_edge_prediction = scale_process(model,
-                                                                                              image_scale,
-                                                                                              classes,
-                                                                                              crop_h, crop_w,
-                                                                                              h, w,
-                                                                                              mean, std)
-            derain_prediction += temp_derain_prediction
-            seg_prediction += temp_seg_prediction
-            edge_prediction += temp_edge_prediction
-        derain_prediction /= len(scales)
-        seg_prediction /= len(scales)
-        edge_prediction /= len(scales)
-        # seg_prediction = np.argmax(seg_prediction, axis=2)
+
+        with torch.no_grad():
+            derain_outs, seg_outs, edge_outs = model(input)
+
+        derain_outs = derain_outs.cpu().numpy()
+        seg_outs = seg_outs.cpu().numpy()
+        edge_outs = edge_outs.cpu().numpy()
 
         # process derain img
-        derain_outs = derain_prediction
+        derain_outs = np.transpose(derain_outs, (0, 2, 3, 1)).squeeze(axis=0)
         derain_outs *= std
         derain_outs += mean
         derain_outs = np.clip(derain_outs, a_max=255, a_min=0)
@@ -236,14 +188,13 @@ def test(test_loader, data_list, model, classes, mean, std, base_size,
         derain_outs = cv2.cvtColor(derain_outs.astype('uint8'), cv2.COLOR_RGB2BGR)
 
         # process seg pred
-        seg_outs = seg_prediction
-        seg_outs = np.argmax(seg_outs, axis=2).squeeze()
+        seg_outs = np.transpose(seg_outs, (0, 2, 3, 1))
+        seg_outs = np.argmax(seg_outs, axis=3).squeeze(axis=0)
 
         # process edge pred
-        edge_outs = edge_prediction
+        edge_outs = np.transpose(edge_outs, (0, 2, 3, 1)).squeeze(axis=3).squeeze(axis=0)
         edge_outs = np.clip(edge_outs, a_max=1, a_min=0)
         edge_outs = (edge_outs * 255).astype('uint8')
-
 
         batch_time.update(time.time() - end)
         end = time.time()
@@ -257,6 +208,7 @@ def test(test_loader, data_list, model, classes, mean, std, base_size,
         check_makedirs(color_folder)
         check_makedirs(derain_folder)
         check_makedirs(edge_folder)
+
         gray = np.uint8(seg_outs)
         color = colorize(gray, colors)
         image_path, _, _ = data_list[i]

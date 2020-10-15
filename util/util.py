@@ -70,6 +70,29 @@ def intersectionAndUnionGPU(output, target, K, ignore_index=255):
     return area_intersection, area_union, area_target
 
 
+def intersectionAndUnionCPU(output, target, K, ignore_index=255):
+    # 'K' classes, output and target sizes are N or N * L or N * H * W, each value in range 0 to K - 1.
+    assert (output.dim() in [1, 2, 3])
+    assert output.shape == target.shape
+
+    output = output.view(-1)
+    target = target.view(-1)
+
+    output = output.cpu().numpy()
+    target = target.cpu().numpy()
+
+    output[target == ignore_index] = ignore_index
+    intersection = output[output == target]
+    area_intersection = np.histogram(intersection, bins=K, range=(0, K-1))
+    # area_intersection = torch.histc(intersection, bins=K, min=0, max=K-1)
+    area_output = np.histogram(output, bins=K, range=(0, K - 1))
+    # area_output = torch.histc(output, bins=K, min=0, max=K-1)
+    area_target = np.histogram(target, bins=K, range=(0, K - 1))
+    # area_target = torch.histc(target, bins=K, min=0, max=K-1)
+    area_union = area_output + area_target - area_intersection
+    return area_intersection, area_union, area_target
+
+
 def batchPSNRandSSIMGPU(derain_output, clear_label, normalize=True):
     if normalize:
         mean = [0.485, 0.456, 0.406]
@@ -93,10 +116,17 @@ def batchPSNRandSSIMGPU(derain_output, clear_label, normalize=True):
         Img = derain_output.data.cpu().numpy().astype(np.float32)
         Iclean = clear_label.data.cpu().numpy().astype(np.float32)
         PSNR = 0
+        SSIM = 0
         for i in range(Img.shape[0]):
             PSNR += compare_psnr(Iclean[i, :, :, :], Img[i, :, :, :], 1)
             SSIM += compare_ssim(Iclean[i, :, :, :], Img[i, :, :, :], multichannel=True)
         return torch.Tensor(PSNR / Img.shape[0]), torch.Tensor(SSIM / Img.shape[0])
+
+
+def caculate_psnr_ssim(Img, Iclean):
+    PSNR = compare_psnr(Iclean, Img, 255)
+    SSIM = compare_ssim(Iclean, Img, multichannel=True)
+    return PSNR, SSIM
 
 
 def check_mkdir(dir_name):

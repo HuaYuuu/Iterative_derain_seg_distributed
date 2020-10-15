@@ -76,11 +76,21 @@ class SemData(Dataset):
 
         label = cv2.imread(label_path, cv2.IMREAD_GRAYSCALE)  # GRAY 1 channel ndarray with shape H * W
 
+        id255 = np.where(label == 255)
+        no255_gt = np.array(label)
+        no255_gt[id255] = 0
+        cgt = cv2.Canny(no255_gt, 5, 5, apertureSize=7)
+        edge_kernel = cv2.getStructuringElement(cv2.MORPH_RECT,
+                                                (7, 7))
+        cgt = cv2.dilate(cgt, edge_kernel)
+        # cgt[cgt == 255] = 1
+        cgt = cgt / 255
+
         if image.shape[0] != rain_image.shape[0] or image.shape[1] != rain_image.shape[1]:
             raise (RuntimeError("Image & Rain Image shape mismatch: " + image_path + " " + label_path + "\n"))
 
         if image.shape[0] != label.shape[0] or image.shape[1] != label.shape[1]:
             raise (RuntimeError("Image & label shape mismatch: " + image_path + " " + label_path + "\n"))
         if self.transform is not None:
-            image, rain_image, label = self.transform(image, rain_image, label)
-        return image, rain_image, label
+            image, rain_image, label, cgt = self.transform(image, rain_image, label, cgt)
+        return image, rain_image, label, cgt
