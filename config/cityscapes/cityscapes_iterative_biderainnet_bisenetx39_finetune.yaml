@@ -13,8 +13,8 @@ TRAIN:
   num_fusion_block: 3
   conv_block_num_features: 64
   sync_bn: True  # adopt syncbn or not
-  train_h: 400 # 500
-  train_w: 400 # 500
+  train_h: 256 # 500
+  train_w: 256 # 500
   scale_min: 0.5  # minimum random scale
   scale_max: 1.5 # 2.0  # maximum random scale
   rotate_min: -10  # minimum random rotate
@@ -23,20 +23,17 @@ TRAIN:
   ignore_label: 255
   derain_loss_type: mse
   derain_loss_weight: 20
-  derain_loss_step_weight: [1, 1, 1]
+  derain_loss_step_weight: [0.4, 0.6, 1]
   seg_loss_type: ce
-  seg_loss_weight: 0.001
-  seg_loss_step_weight: [1, 1, 1]
-  edge_loss_type: mse
-  edge_loss_weight: 0.001
-  edge_loss_step_weight: [1, 1, 1]
+  seg_loss_weight: 0
+  seg_loss_step_weight: [0.4, 0.6, 1]
   ohem: True
   train_gpu: [0, 1, 2, 3]
   workers: 16  # data loader workers
-  batch_size: 8  # batch size for training
+  batch_size: 16  # batch size for training
   batch_size_val: 8  # batch size for validation during training, memory and speed tradeoff
-  base_lr: 0.0001
-  epochs: 150
+  base_lr: 0.001
+  epochs: 500
   start_epoch: 0
   power: 0.9
   momentum: 0.9
@@ -44,7 +41,7 @@ TRAIN:
   manual_seed:
   print_freq: 10
   save_freq: 1
-  save_path: exp/cityscapes/iterative_biderainnet_bisenetx39/model_lr1e5_150epoch_20-1
+  save_path: exp/cityscapes/iterative_biderainnet_bisenetx39_finetune_fixseg/model_lr1e3_500epoch
   pretrained: True
   edge_pretrained_path: initmodel/BiDerainNetEdge.pth
   derain_first_pretrained_path: initmodel/BiDerainNet_first.pth
@@ -62,7 +59,7 @@ Distributed:
   rank: 0
 
 TEST:
-  test_list: /media/user/f1c759ab-f07b-42ed-92b2-32d01809b317/liyi/2021CVPR/important_experiment/dataset/cityscapes/list/cityscapes/fine_val.txt
+  test_list: /media/user/f1c759ab-f07b-42ed-92b2-32d01809b317/liyi/2021CVPR/important_experiment/dataset/cityscapes/list/cityscapes/fine_train.txt
   split: val  # split in [train, val and test]
   base_size: 2048  # based size for scaling
   test_h: 400
@@ -75,7 +72,7 @@ TEST:
   index_start: 0  # evaluation start index in list
   index_step: 0  # evaluation step index in list, 0 means to end
   test_gpu: [0]
-  model_path: exp/cityscapes/pspnet50/model/train_epoch_200.pth  # evaluation model path
-  save_folder: exp/cityscapes/pspnet50/result/epoch_200/val/ss  # results save folder
+  model_path: exp/cityscapes/iterative_biderainnet_bisenetx39_finetune_fixseg/model_lr1e3_500epoch/train_epoch_500.pth  # evaluation model path
+  save_folder: exp/cityscapes/iterative_biderainnet_bisenetx39_finetune_fixseg/result/model_lr1e3_500epoch/epoch_500/train/ss  # results save folder
   colors_path: /media/user/f1c759ab-f07b-42ed-92b2-32d01809b317/liyi/2021CVPR/important_experiment/dataset/cityscapes/cityscapes_colors.txt  # path of dataset colors
   names_path: /media/user/f1c759ab-f07b-42ed-92b2-32d01809b317/liyi/2021CVPR/important_experiment/dataset/cityscapes/cityscapes_names.txt  # path of dataset category names
